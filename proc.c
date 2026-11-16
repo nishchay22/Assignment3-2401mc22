@@ -88,7 +88,10 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-
+  p->ctime = ticks;          // Q1: creation time
+  p->priority = 10;          // Q2: default priority (1 = highest, 20 = lowest)
+  p->wait_ticks = 0;         // Q2: ticks waited in RUNNABLE state
+  p->burst_time = 0;         // Q3: default burst time (0 = unset / lowest priority)
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -325,6 +328,9 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
+#if defined(SCHED_PRIO)
+  int rr_idx = 0;
+#endif
   
   for(;;){
     // Enable interrupts on this processor.
@@ -332,6 +338,91 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+#if defined(SCHED_FCFS)
+    // Question 1: Non-Preemptive First-Come First-Served (FCFS) Scheduler
+    // Pick the RUNNABLE process with the smallest ctime (arrived first).
+    struct proc *min_p = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+      if(min_p == 0 || p->ctime < min_p->ctime)
+        min_p = p;
+    }
+    if(min_p != 0){
+      p = min_p;
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#elif defined(SCHED_PRIO)
+    // Question 2: Priority-Based Preemptive Scheduler with Aging
+    // Pick the RUNNABLE process with the lowest priority number (1 = highest, 20 = lowest);
+    // break ties round-robin by starting the search after rr_idx.
+    struct proc *best_p = 0;
+    int best_idx = -1;
+    int i;
+    for(i = 0; i < NPROC; i++){
+      int idx = (rr_idx + 1 + i) % NPROC;
+      p = &ptable.proc[idx];
+      if(p->state != RUNNABLE)
+        continue;
+      if(best_p == 0 || p->priority < best_p->priority){
+        best_p = p;
+        best_idx = idx;
+      }
+    }
+    if(best_p != 0){
+      p = best_p;
+      rr_idx = best_idx;
+      p->wait_ticks = 0; // Reset wait counter when scheduled to run
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#elif defined(SCHED_SJF)
+    // Question 3: Non-Preemptive Shortest Job First (SJF) Scheduler
+    // Pick the RUNNABLE process with the smallest positive burst_time.
+    // Processes with burst_time <= 0 (default 0 or -1) are treated as lowest priority (scheduled last).
+    struct proc *min_p = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+      if(min_p == 0){
+        min_p = p;
+      } else {
+        int p_bt = (p->burst_time <= 0) ? 0x7fffffff : p->burst_time;
+        int min_bt = (min_p->burst_time <= 0) ? 0x7fffffff : min_p->burst_time;
+        if(p_bt < min_bt)
+          min_p = p;
+      }
+    }
+    if(min_p != 0){
+      p = min_p;
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+    }
+
+#else
+    // Default Round-Robin Scheduler
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
@@ -350,6 +441,8 @@ scheduler(void)
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+#endif
+
     release(&ptable.lock);
 
   }
@@ -385,10 +478,33 @@ sched(void)
 void
 yield(void)
 {
+#if defined(SCHED_FCFS) || defined(SCHED_SJF)
+  // Non-preemptive schedulers (FCFS and SJF) let the running process
+  // run to completion without timer preemption.
+  return;
+#else
+  struct proc *p;
+
   acquire(&ptable.lock);  //DOC: yieldlock
+  // Q2 Aging: every timer tick that a RUNNABLE process waits without running,
+  // increment its wait_ticks. If wait_ticks exceeds 30, raise its priority
+  // (decrement priority number by 1) and reset wait_ticks.
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == RUNNABLE){
+      p->wait_ticks++;
+      if(p->wait_ticks > 30){
+        if(p->priority > 1){
+          p->priority--;
+          cprintf("[Aging] PID %d waited >30 ticks -> priority raised to %d\n", p->pid, p->priority);
+        }
+        p->wait_ticks = 0;
+      }
+    }
+  }
   myproc()->state = RUNNABLE;
   sched();
   release(&ptable.lock);
+#endif
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -531,4 +647,47 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// Q2: Change a process's priority (1 = highest, 20 = lowest)
+int
+set_priority(int pid, int priority)
+{
+  struct proc *p;
+
+  if(priority < 1 || priority > 20)
+    return -1;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != UNUSED && p->pid == pid){
+      p->priority = priority;
+      p->wait_ticks = 0;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+// Q3: Declare expected CPU burst time (in ticks) for a process
+int
+set_burst(int pid, int bt)
+{
+  struct proc *p;
+
+  if(bt < 0)
+    return -1;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != UNUSED && p->pid == pid){
+      p->burst_time = bt;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
 }

@@ -49,6 +49,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uint ctime;                  // Q1: Process creation time (in ticks)
+  int priority;                // Q2: Process priority (1 = highest, 20 = lowest, default = 10)
+  int wait_ticks;              // Q2: Ticks spent waiting in RUNNABLE state (for aging)
+  int burst_time;              // Q3: Estimated CPU burst time in ticks (default = 0)
 };
 
 // Process memory is laid out contiguously, low addresses first:

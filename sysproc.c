@@ -89,3 +89,25 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// Q2: Set priority of process with given pid (1 = highest, 20 = lowest)
+int
+sys_set_priority(void)
+{
+  int pid, priority;
+
+  if(argint(0, &pid) < 0 || argint(1, &priority) < 0)
+    return -1;
+  return set_priority(pid, priority);
+}
+
+// Q3: Set estimated CPU burst time (in ticks) of process with given pid
+int
+sys_set_burst(void)
+{
+  int pid, bt;
+
+  if(argint(0, &pid) < 0 || argint(1, &bt) < 0)
+    return -1;
+  return set_burst(pid, bt);
+}
